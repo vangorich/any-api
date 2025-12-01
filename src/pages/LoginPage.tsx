@@ -135,6 +135,16 @@ export default function LoginPage() {
 
     // 新的发送验证码处理流程
     const handleSendCode = async () => {
+        // 前置检查：如果系统根本不需要邮箱验证，则直接阻止
+        if (!systemConfig?.require_email_verification) {
+            toast({
+                variant: 'error',
+                title: '操作无效',
+                description: '系统当前未开启邮箱验证功能。',
+            });
+            return;
+        }
+
         const isEmailInputValid = isResetPassword
             ? !!email
             : emailInputRef.current?.checkValidity();
