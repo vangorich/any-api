@@ -182,27 +182,6 @@ export default function AdminUsersPage() {
         }
     };
 
-    const handleDelete = async (userId: number, username: string) => {
-        if (!await confirm({ title: "注销用户", description: `确定要注销用户 "${username}" 吗？此操作会将用户设置为不活跃状态。`, confirmText: "注销" })) return;
-
-        const token = localStorage.getItem('token');
-        try {
-            await axios.delete(`${API_BASE_URL}/users/${userId}`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            fetchUsers(userData.page, userData.size, searchQuery);
-            toast({
-                variant: 'success',
-                title: '用户已注销',
-            });
-        } catch (error: any) {
-            toast({
-                variant: 'error',
-                title: '注销失败',
-                description: error.response?.data?.detail || '无法注销用户',
-            });
-        }
-    };
 
     return (
         <div className="space-y-6">

@@ -118,11 +118,9 @@ export default function PresetsPage() {
 
             // The backend now returns the full preset with items if they are created from content
             // We need to parse the content string back to an object for the frontend state
-            let items = [];
             if (newPresetData.content && typeof newPresetData.content === 'string') {
                 try {
-                    const parsedContent = JSON.parse(newPresetData.content);
-                    items = parsedContent.preset || [];
+                    JSON.parse(newPresetData.content);
                 } catch (e) {
                     console.error("Failed to parse content from newly created preset", e);
                 }

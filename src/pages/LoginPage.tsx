@@ -17,13 +17,13 @@ export default function LoginPage() {
     const [isResetPassword, setIsResetPassword] = useState(false);
     const [username, setUsername] = useState('');
     const [email, setEmail] = useState('');
-    const [emailOrUsername, setEmailOrUsername] = useState('');
+    useState('');
     const [password, setPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
     const [verificationCode, setVerificationCode] = useState('');
     const [turnstileToken, setTurnstileToken] = useState('');
-    const [captchaId, setCaptchaId] = useState(''); // 仍然需要，但由弹窗管理
-    const [captchaCode, setCaptchaCode] = useState(''); // 同上
+    useState(''); // 仍然需要，但由弹窗管理
+    useState(''); // 同上
     const { config: systemConfig, loading: configLoading } = useSystem();
     const [isCaptchaDialogOpen, setIsCaptchaDialogOpen] = useState(false);
     const [captchaInfoForTurnstile, setCaptchaInfoForTurnstile] = useState<{ captchaId: string, captchaCode: string } | null>(null);
@@ -342,7 +342,6 @@ export default function LoginPage() {
             // 切换到登录模式并清空表单
             setIsLogin(true);
             setIsResetPassword(false);
-            setEmailOrUsername('');
             setVerificationCode('');
             setPassword('');
             setConfirmPassword('');

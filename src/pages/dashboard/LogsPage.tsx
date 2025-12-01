@@ -6,7 +6,6 @@ import { API_BASE_URL } from '@/utils/api';
 import { cn } from '@/lib/utils';
 import MaskedKey from '@/components/MaskedKey';
 import { Pagination } from '@/components/ui/pagination';
-import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/useToast';
 
 interface Log {
@@ -33,11 +32,10 @@ interface PaginatedResponse<T> {
 
 export default function LogsPage() {
     const [logData, setLogData] = useState<PaginatedResponse<Log>>({ items: [], total: 0, page: 1, size: 20 });
-    const [loading, setLoading] = useState(false);
+    useState(false);
     const { toast } = useToast();
 
     const fetchLogs = useCallback(async (page = 1, size = 20) => {
-        setLoading(true);
         try {
             const token = localStorage.getItem('token');
             const response = await axios.get<PaginatedResponse<Log>>(`${API_BASE_URL}/logs/`, {
@@ -49,7 +47,6 @@ export default function LogsPage() {
             console.error('Failed to fetch logs', error);
             toast({ variant: 'error', title: '加载日志失败' });
         } finally {
-            setLoading(false);
         }
     }, [toast]);
 

@@ -79,7 +79,7 @@ export function ConfirmDialog() {
         setIsMounted(true);
     }, []);
 
-    const { isOpen, title, description, confirmText, cancelText, onConfirm, onCancel, close } = useConfirmStore();
+    const { isOpen, title, description, confirmText, cancelText, onConfirm, onCancel } = useConfirmStore();
 
     if (!isMounted) return null;
 
