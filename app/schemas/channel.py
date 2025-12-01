@@ -25,7 +25,8 @@ class Channel(ChannelBase):
     active_keys: int = 0
     usage_count: int = 0
     error_count: int = 0
-    total_tokens: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
     class Config:
         from_attributes = True

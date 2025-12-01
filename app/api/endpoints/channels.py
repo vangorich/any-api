@@ -26,7 +26,8 @@ async def read_channels(
             func.sum(case((OfficialKey.is_active, 1), else_=0)).label("active_keys"),
             func.sum(OfficialKey.usage_count).label("usage_count"),
             func.sum(OfficialKey.error_count).label("error_count"),
-            func.sum(OfficialKey.total_tokens).label("total_tokens")
+            func.sum(OfficialKey.input_tokens).label("input_tokens"),
+            func.sum(OfficialKey.output_tokens).label("output_tokens")
         )
         .group_by(OfficialKey.channel_id)
         .subquery()
@@ -39,7 +40,8 @@ async def read_channels(
             func.coalesce(subquery.c.active_keys, 0).label("active_keys"),
             func.coalesce(subquery.c.usage_count, 0).label("usage_count"),
             func.coalesce(subquery.c.error_count, 0).label("error_count"),
-            func.coalesce(subquery.c.total_tokens, 0).label("total_tokens")
+            func.coalesce(subquery.c.input_tokens, 0).label("input_tokens"),
+            func.coalesce(subquery.c.output_tokens, 0).label("output_tokens")
         )
         .outerjoin(subquery, ChannelModel.id == subquery.c.channel_id)
         .where(ChannelModel.user_id == current_user.id)
@@ -48,13 +50,14 @@ async def read_channels(
     result = await db.execute(stmt)
     
     channels_data = []
-    for channel, total_keys, active_keys, usage_count, error_count, total_tokens in result.all():
+    for channel, total_keys, active_keys, usage_count, error_count, input_tokens, output_tokens in result.all():
         channel_dict = channel.__dict__
         channel_dict["total_keys"] = total_keys
         channel_dict["active_keys"] = active_keys
         channel_dict["usage_count"] = usage_count
         channel_dict["error_count"] = error_count
-        channel_dict["total_tokens"] = total_tokens
+        channel_dict["input_tokens"] = input_tokens
+        channel_dict["output_tokens"] = output_tokens
         channels_data.append(channel_dict)
         
     return channels_data

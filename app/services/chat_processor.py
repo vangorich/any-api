@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.openai import ChatCompletionRequest, ChatMessage
 from app.services.universal_converter import universal_converter, ApiFormat
+from app.core.errors import ErrorConverter
 from app.services.variable_service import variable_service
 from app.services.regex_service import regex_service
 from app.models.user import User
@@ -15,6 +16,7 @@ from app.models.preset import Preset
 from app.models.regex import RegexRule
 from app.models.preset_regex import PresetRegexRule
 from app.models.log import Log
+from app.models.key import count_tokens_for_messages, get_tokenizer
 from app.core.config import settings
 from sqlalchemy.future import select
 from fastapi import Request
@@ -47,7 +49,7 @@ class ChatProcessor:
             
         openai_request = ChatCompletionRequest(**converted_body)
         
-        log_entry = await self._create_initial_log(db, exclusive_key, official_key, user, openai_request.model, openai_request.stream, body_bytes)
+        log_entry = await self._create_initial_log(db, exclusive_key, official_key, user, openai_request.model, openai_request.stream, [msg.dict() for msg in openai_request.messages])
 
         presets, regex_rules, preset_regex_rules = await self._load_context(db, exclusive_key)
         openai_request = self._apply_preprocessing(openai_request, presets, regex_rules, preset_regex_rules)
@@ -70,7 +72,10 @@ class ChatProcessor:
                 official_key.key, regex_rules, preset_regex_rules
             )
             latency = time.time() - start_time
-            output_tokens = result.get('usage', {}).get('completion_tokens', 0)
+            # Re-calculate output tokens from the actual response content
+            tokenizer = get_tokenizer(openai_request.model)
+            response_content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+            output_tokens = len(tokenizer.encode(response_content))
             await self._finalize_log(db, log_entry, official_key, status_code, latency, output_tokens)
             return result, status_code, original_format
 
@@ -154,11 +159,13 @@ class ChatProcessor:
         content = regex_service.process(content, global_post)
         return content
 
-    async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, official_key: OfficialKey, user: User, model: str, is_stream: bool, request_body: bytes) -> Log:
-        input_tokens = len(request_body) // 4
+    async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, official_key: OfficialKey, user: User, model: str, is_stream: bool, messages: List[Dict[str, Any]]) -> Log:
+        # Use tiktoken for input tokens
+        input_tokens = count_tokens_for_messages(messages, model)
+        
         log_entry = Log(
             exclusive_key_id=exclusive_key.id,
-            official_key_id=official_key.id, # Link to official key
+            official_key_id=official_key.id,
             user_id=user.id,
             model=model,
             status="processing",
@@ -168,56 +175,46 @@ class ChatProcessor:
             input_tokens=input_tokens,
             output_tokens=0
         )
-        # We don't commit here, just prepare the object
         return log_entry
 
-    async def _finalize_log(self, db: AsyncSession, log_entry: Optional[Log], official_key: OfficialKey, status_code: int, latency: float, output_tokens: int, ttft: Optional[float] = None):
+    async def _finalize_log(self, db: AsyncSession, log_entry: Optional[Log], official_key: OfficialKey, status_code: Any, latency: float, output_tokens: int, ttft: Optional[float] = None):
         if not log_entry or not official_key:
-            print(f"DEBUG: [ChatProcessor] Finalize_log SKIPPED")
             return
 
-        print(f"DEBUG: [ChatProcessor] --- ENTERING FINALIZE_LOG ---")
-        print(f"DEBUG: [ChatProcessor] Official Key ID: {official_key.id}")
-        print(f"DEBUG: [ChatProcessor] Initial Key Stats: usage={official_key.usage_count}, errors={official_key.error_count}, tokens={official_key.total_tokens}")
-
         try:
+            # Ensure status_code is a valid integer for comparison
+            try:
+                numeric_status_code = int(status_code)
+            except (ValueError, TypeError):
+                numeric_status_code = 500  # Default to internal server error if conversion fails
+            
             # 1. Finalize Log
-            log_entry.status_code = status_code
-            log_entry.status = "ok" if 200 <= status_code < 300 else "error"
+            log_entry.status_code = numeric_status_code
+            log_entry.status = "ok" if 200 <= numeric_status_code < 300 else "error"
             log_entry.latency = latency
             log_entry.ttft = ttft if ttft is not None else latency
             log_entry.output_tokens = output_tokens
             db.add(log_entry)
 
             # 2. Update Official Key Stats
-            new_usage = official_key.usage_count + 1
-            new_tokens = official_key.total_tokens + (log_entry.input_tokens or 0) + output_tokens
-            new_error_count = official_key.error_count
+            official_key.usage_count += 1
+            official_key.input_tokens = (official_key.input_tokens or 0) + (log_entry.input_tokens or 0)
+            official_key.output_tokens = (official_key.output_tokens or 0) + output_tokens
+            official_key.last_status_code = numeric_status_code
             
             if log_entry.status == "error":
-                new_error_count += 1
+                official_key.error_count += 1
                 official_key.last_status = str(status_code)
             else:
                 official_key.last_status = "active"
 
-            print(f"DEBUG: [ChatProcessor] Calculated New Stats: usage={new_usage}, errors={new_error_count}, tokens={new_tokens}")
-
-            official_key.usage_count = new_usage
-            official_key.total_tokens = new_tokens
-            official_key.error_count = new_error_count
-            official_key.last_status_code = status_code
-            
             db.add(official_key)
-
             await db.commit()
-            print(f"DEBUG: [ChatProcessor] COMMIT SUCCEEDED for Official Key ID {official_key.id}")
+            logger.info(f"[ChatProcessor] Finalized log and updated key stats for Official Key ID {official_key.id}")
 
         except Exception as e:
-            print(f"DEBUG: [ChatProcessor] COMMIT FAILED. Error: {e}")
-            logger.error(f"[ChatProcessor] Failed to finalize log and key stats: {e}", exc_info=True)
+            logger.error(f"[ChatProcessor] Failed to finalize log and key stats for Official Key ID {official_key.id}. Error: {e}", exc_info=True)
             await db.rollback()
-        
-        print(f"DEBUG: [ChatProcessor] --- EXITING FINALIZE_LOG ---")
 
     async def non_stream_chat_completion(
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
@@ -229,8 +226,8 @@ class ChatProcessor:
         response = await self.client.post(target_url, json=payload, headers=headers)
         
         if response.status_code != 200:
-            openai_error = universal_converter.generic_error_to_openai(response.content, response.status_code, upstream_format)
-            return openai_error, response.status_code, "openai"
+            converted_error = ErrorConverter.convert_upstream_error(response.content, response.status_code, upstream_format, original_format)
+            return converted_error, response.status_code, original_format
 
         gemini_response = response.json()
         openai_response = universal_converter.gemini_response_to_openai_response(gemini_response, model)
@@ -262,17 +259,28 @@ class ChatProcessor:
                     if content_part != b'[DONE]':
                         try:
                             json_content = json.loads(content_part)
-                            if json_content.get('error'):
-                                status_code = json_content.get('error', {}).get('code', 500)
-                            if json_content.get('choices'):
-                                delta = json_content['choices'][0].get('delta', {})
-                                full_response_content += delta.get('content', '')
+                            # Handle cases where json_content might be a list of chunks
+                            chunks_to_process = json_content if isinstance(json_content, list) else [json_content]
+                            for chunk_item in chunks_to_process:
+                                if not isinstance(chunk_item, dict): continue
+
+                                if chunk_item.get('error'):
+                                    # Ensure status_code is an integer
+                                    code = chunk_item.get('error', {}).get('code', 500)
+                                    try:
+                                        status_code = int(code)
+                                    except (ValueError, TypeError):
+                                        status_code = 500 # Fallback for non-integer codes
+                                if chunk_item.get('choices'):
+                                    delta = chunk_item['choices'][0].get('delta', {})
+                                    full_response_content += delta.get('content', '')
                         except json.JSONDecodeError:
                             pass
                 yield chunk
         finally:
             latency = time.time() - start_time
-            output_tokens = len(full_response_content) // 4
+            tokenizer = get_tokenizer(log_entry.model)
+            output_tokens = len(tokenizer.encode(full_response_content))
             await self._finalize_log(db, log_entry, official_key, status_code, latency, output_tokens, ttft)
 
 
@@ -283,37 +291,44 @@ class ChatProcessor:
         target_url = f"{settings.GEMINI_BASE_URL}/v1beta/models/{model}:streamGenerateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": official_key.key if hasattr(official_key, 'key') else official_key}
 
-        async with self.client.stream("POST", target_url, json=payload, headers=headers) as response:
-            if response.status_code != 200:
-                error_content = await response.aread()
-                openai_error = universal_converter.generic_error_to_openai(error_content, response.status_code, upstream_format)
-                yield f"data: {json.dumps(openai_error)}\n\n".encode()
-                return
+        try:
+            async with self.client.stream("POST", target_url, json=payload, headers=headers) as response:
+                if response.status_code != 200:
+                    error_content = await response.aread()
+                    converted_error = ErrorConverter.convert_upstream_error(error_content, response.status_code, upstream_format, original_format)
+                    yield f"data: {json.dumps(converted_error)}\n\n".encode()
+                    return
 
-            buffer = ""
-            async for chunk in response.aiter_text():
-                buffer += chunk
-                decoder = json.JSONDecoder()
-                while buffer:
-                    buffer = buffer.lstrip(' \t\n\r,([')
-                    if not buffer: break
-                    try:
-                        gemini_chunk, idx = decoder.raw_decode(buffer)
-                        openai_chunk = universal_converter.gemini_to_openai_chunk(gemini_chunk, model)
-                        if openai_chunk.get('choices') and openai_chunk['choices'][0]['delta'].get('content'):
-                            content = openai_chunk['choices'][0]['delta']['content']
-                            content = self._apply_postprocessing(content, global_rules, local_rules)
-                            openai_chunk['choices'][0]['delta']['content'] = content
-                        
-                        if original_format == "gemini":
-                            gemini_response_chunk = universal_converter.openai_chunk_to_gemini_chunk(openai_chunk)
-                            yield f"data: {json.dumps(gemini_response_chunk)}\n\n".encode()
-                        else:
-                            yield f"data: {json.dumps(openai_chunk)}\n\n".encode()
-                        
-                        buffer = buffer[idx:]
-                    except json.JSONDecodeError:
-                        break
-        yield b"data: [DONE]\n\n"
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
+                    decoder = json.JSONDecoder()
+                    while buffer:
+                        buffer = buffer.lstrip(' \t\n\r,([')
+                        if not buffer: break
+                        try:
+                            gemini_chunk, idx = decoder.raw_decode(buffer)
+                            openai_chunk = universal_converter.gemini_to_openai_chunk(gemini_chunk, model)
+                            if openai_chunk.get('choices') and openai_chunk['choices'][0]['delta'].get('content'):
+                                content = openai_chunk['choices'][0]['delta']['content']
+                                content = self._apply_postprocessing(content, global_rules, local_rules)
+                                openai_chunk['choices'][0]['delta']['content'] = content
+                            
+                            if original_format == "gemini":
+                                gemini_response_chunk = universal_converter.openai_chunk_to_gemini_chunk(openai_chunk)
+                                yield f"data: {json.dumps(gemini_response_chunk)}\n\n".encode()
+                            else:
+                                yield f"data: {json.dumps(openai_chunk)}\n\n".encode()
+                            
+                            buffer = buffer[idx:]
+                        except json.JSONDecodeError:
+                            break
+            yield b"data: [DONE]\n\n"
+        except httpx.RequestError as e:
+            logger.error(f"[ChatProcessor] Upstream request failed: {e}", exc_info=True)
+            error_message = f"无法连接到上游服务: {type(e).__name__}"
+            converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, "openai", original_format)
+            yield f"data: {json.dumps(converted_error)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
 
 chat_processor = ChatProcessor()

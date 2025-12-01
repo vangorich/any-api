@@ -49,7 +49,8 @@ interface OfficialKey {
     is_active: boolean;
     usage_count: number;
     error_count: number;
-    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
     last_status: string | number;
     last_status_code: number | null;
     channel_id: number | null;
@@ -508,7 +509,7 @@ export default function ChannelsPage() {
                                                 <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground">状态</th>
                                                 <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground">状态码</th>
                                                 <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground">请求/错误</th>
-                                                <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground">Tokens</th>
+                                                <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground">令牌 (输入/输出)</th>
                                                 <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground">创建时间</th>
                                                 <th className="h-12 px-4 text-right align-middle font-medium text-muted-foreground"></th>
                                             </tr>
@@ -578,7 +579,7 @@ export default function ChannelsPage() {
                                                                 </div>
                                                             </td>
                                                             <td className="p-4 align-middle text-center font-mono text-sm">
-                                                                {key.total_tokens.toLocaleString()}
+                                                                {key.input_tokens.toLocaleString()} / {key.output_tokens.toLocaleString()}
                                                             </td>
                                                             <td className="p-4 align-middle text-center text-sm text-muted-foreground">
                                                                 {new Date(key.created_at).toLocaleDateString()}

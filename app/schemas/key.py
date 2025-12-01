@@ -24,10 +24,11 @@ class OfficialKeyUpdate(BaseModel):
 class OfficialKey(OfficialKeyBase):
     id: int
     user_id: int
-    usage_count: int
-    error_count: int
-    total_tokens: int
-    last_status: str
+    usage_count: int = 0
+    error_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    last_status: Optional[str] = 'n/a'
     last_status_code: Optional[int] = None
     created_at: datetime
 

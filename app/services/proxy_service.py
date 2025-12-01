@@ -7,12 +7,15 @@ from fastapi import Request, Response, BackgroundTasks, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
+from app.core.errors import ErrorConverter
 from app.services.universal_converter import universal_converter
 from app.services.gemini_service import gemini_service
 from app.services.claude_service import claude_service
 from app.models.key import OfficialKey
 from app.models.log import Log
 from app.models.user import User
+from app.models.key import count_tokens_for_messages, get_tokenizer
+from typing import List, Dict
 
 # 强制配置 logger 输出到控制台，确保用户能看到日志
 logging.basicConfig(level=logging.INFO)
@@ -32,14 +35,14 @@ class ProxyService:
         user: Optional[User],
         model: str,
         is_stream: bool,
-        request_body: bytes
+        messages: List[Dict]
     ) -> Log:
         """Creates and returns an initial Log object without saving it."""
         if not official_key_obj:
             return None
         
-        # 粗略计算输入token
-        input_tokens = len(request_body) // 4
+        # 使用 tiktoken 计算输入 token
+        input_tokens = count_tokens_for_messages(messages, model)
         
         log_entry = Log(
             official_key_id=official_key_obj.id,
@@ -66,60 +69,49 @@ class ProxyService:
         db: AsyncSession,
         log_entry: Optional[Log],
         key_obj: Optional[OfficialKey], # 传入key对象
-        status_code: int,
+        status_code: Any,
         latency: float,
         output_tokens: int,
         ttft: Optional[float] = None
     ):
         """Finalizes the log entry and updates the key stats."""
         if not log_entry or not key_obj:
-            print(f"DEBUG: [Proxy] Finalize_log SKIPPED: No log_entry or key_obj.")
             return
 
-        print(f"DEBUG: [Proxy] --- ENTERING FINALIZE_LOG ---")
-        print(f"DEBUG: [Proxy] Key ID: {key_obj.id}")
-        print(f"DEBUG: [Proxy] Initial Key Stats: usage={key_obj.usage_count}, errors={key_obj.error_count}, tokens={key_obj.total_tokens}")
-        print(f"DEBUG: [Proxy] Log ID: {log_entry.id}")
-        print(f"DEBUG: [Proxy] Event: status_code={status_code}, latency={latency}, output_tokens={output_tokens}")
-
         try:
+            # Ensure status_code is a valid integer for comparison
+            try:
+                numeric_status_code = int(status_code)
+            except (ValueError, TypeError):
+                numeric_status_code = 500 # Default to internal server error
+
             # 1. Finalize Log
-            log_entry.status_code = status_code
-            log_entry.status = "ok" if 200 <= status_code < 300 else "error"
+            log_entry.status_code = numeric_status_code
+            log_entry.status = "ok" if 200 <= numeric_status_code < 300 else "error"
             log_entry.latency = latency
             log_entry.ttft = ttft if ttft is not None else latency
             log_entry.output_tokens = output_tokens
             db.add(log_entry)
 
             # 2. Update Key Stats
-            new_usage = key_obj.usage_count + 1
-            new_tokens = key_obj.total_tokens + (log_entry.input_tokens or 0) + output_tokens
-            new_error_count = key_obj.error_count
+            key_obj.usage_count += 1
+            key_obj.input_tokens = (key_obj.input_tokens or 0) + (log_entry.input_tokens or 0)
+            key_obj.output_tokens = (key_obj.output_tokens or 0) + output_tokens
+            key_obj.last_status_code = numeric_status_code
             
             if log_entry.status == "error":
-                new_error_count += 1
-                key_obj.last_status = str(status_code)
+                key_obj.error_count += 1
+                key_obj.last_status = str(numeric_status_code)
             else:
                 key_obj.last_status = "active"
-
-            print(f"DEBUG: [Proxy] Calculated New Stats: usage={new_usage}, errors={new_error_count}, tokens={new_tokens}")
-
-            key_obj.usage_count = new_usage
-            key_obj.total_tokens = new_tokens
-            key_obj.error_count = new_error_count
-            key_obj.last_status_code = status_code
             
             db.add(key_obj)
-
             await db.commit()
-            print(f"DEBUG: [Proxy] COMMIT SUCCEEDED for Key ID {key_obj.id}")
+            logger.info(f"[Proxy] Finalized log and updated key stats for Key ID {key_obj.id}")
 
         except Exception as e:
-            print(f"DEBUG: [Proxy] COMMIT FAILED for Key ID {key_obj.id}. Error: {e}")
-            logger.error(f"[Proxy] Failed to finalize log and key stats: {e}", exc_info=True)
+            logger.error(f"[Proxy] Failed to finalize log and key stats for Key ID {key_obj.id}. Error: {e}", exc_info=True)
             await db.rollback()
-        
-        print(f"DEBUG: [Proxy] --- EXITING FINALIZE_LOG ---")
 
 
     def identify_target_provider(self, key: str) -> str:
@@ -232,14 +224,16 @@ class ProxyService:
         
         request_model = "unknown"
         is_stream = False
+        messages = []
         try:
             request_data = json.loads(body)
             request_model = request_data.get("model", "unknown")
             is_stream = request_data.get("stream", False)
+            messages = request_data.get("messages", [])
         except:
             pass
 
-        log_entry = await self._create_initial_log(db, key_obj, user, request_model, is_stream, body)
+        log_entry = await self._create_initial_log(db, key_obj, user, request_model, is_stream, messages)
 
         try:
             logger.info(f"[Proxy] Forwarding request to: {target_url} (Method: {request.method})")
@@ -256,8 +250,6 @@ class ProxyService:
                 await response.aclose()
                 latency = time.time() - start_time
                 await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
-                print(f"DEBUG: [Proxy] Calling finalize_log for error response {response.status_code}")
-                await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
                 return Response(content=error_content, status_code=response.status_code, media_type=response.headers.get("content-type"))
 
             excluded_response_headers = {"content-encoding", "content-length", "transfer-encoding", "connection"}
@@ -265,15 +257,37 @@ class ProxyService:
 
             # 对于流式响应，我们牺牲部分指标的精确性以换取日志记录的可靠性
             # 不在生成器内部提交数据库，避免会话关闭问题
-            async def stream_generator(response: httpx.Response):
+            async def stream_generator(response: httpx.Response, log_entry: Log, key_obj: OfficialKey, start_time: float):
+                full_response_content = ""
+                tokenizer = get_tokenizer(log_entry.model)
                 try:
                     async for chunk in response.aiter_bytes():
+                        try:
+                            # Attempt to decode for token counting, ignore if not valid JSON/text
+                            chunk_text = chunk.decode('utf-8')
+                            if chunk_text.startswith('data: '):
+                                content_part = chunk_text[6:].strip()
+                                if content_part != '[DONE]':
+                                    json_content = json.loads(content_part)
+                                    if json_content.get('choices'):
+                                        delta = json_content['choices'][0].get('delta', {})
+                                        full_response_content += delta.get('content', '')
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            pass
                         yield chunk
+                except httpx.RequestError as e:
+                    logger.error(f"[Proxy] Stream request failed: {e}", exc_info=True)
+                    # For passthrough, we can't easily inject an error chunk. The connection will just close.
+                    # The log will be finalized with an error code if we can get here.
                 finally:
                     await response.aclose()
+                    latency = time.time() - start_time
+                    output_tokens = len(tokenizer.encode(full_response_content))
+                    # We can't get ttft easily here, so we pass latency
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens, latency)
 
             return StreamingResponse(
-                stream_generator(response),
+                stream_generator(response, log_entry, key_obj, start_time),
                 status_code=response.status_code,
                 headers=response_headers,
                 media_type=response.headers.get("content-type")
@@ -282,8 +296,6 @@ class ProxyService:
         except httpx.RequestError as e:
             logger.error(f"Proxy request failed: {e}")
             latency = time.time() - start_time
-            await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
-            print(f"DEBUG: [Proxy] Calling finalize_log for httpx.RequestError")
             await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
             raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
 
@@ -365,7 +377,9 @@ class ProxyService:
         # 5. 发送请求
         client = self._get_client(target_provider)
         
-        log_entry = await self._create_initial_log(db, key_obj, user, original_model, stream, body_bytes)
+        # messages should be in the converted_body for conversion cases
+        messages = converted_body.get("messages", [])
+        log_entry = await self._create_initial_log(db, key_obj, user, original_model, stream, messages)
 
         try:
             req = client.build_request(
@@ -378,9 +392,9 @@ class ProxyService:
                 await response.aclose()
                 latency = time.time() - start_time
                 await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
-                print(f"DEBUG: [Proxy] Calling finalize_log for conversion error response {response.status_code}")
-                await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
-                return Response(content=error_content, status_code=response.status_code)
+                # Convert the error to the original incoming format
+                converted_error = ErrorConverter.convert_upstream_error(error_content, response.status_code, target_provider, incoming_format)
+                return JSONResponse(status_code=response.status_code, content=converted_error)
 
             if stream:
                 return StreamingResponse(
@@ -394,30 +408,33 @@ class ProxyService:
                 output_tokens = 0
                 try:
                     resp_json = json.loads(resp_content)
-                    final_response, usage = universal_converter.convert_response(resp_json, incoming_format, target_provider, original_model)
-                    output_tokens = usage.get("completion_tokens", 0)
-                    # input_tokens can also be updated here if available
-                    if log_entry and usage.get("prompt_tokens"):
-                        log_entry.input_tokens = usage.get("prompt_tokens")
+                    final_response, _ = universal_converter.convert_response(resp_json, incoming_format, target_provider, original_model)
                     
-                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens)
-                    print(f"DEBUG: [Proxy] Calling finalize_log for successful conversion response")
+                    # Recalculate output_tokens from actual response
+                    tokenizer = get_tokenizer(original_model)
+                    response_content = final_response.get('choices', [{}])[0].get('message', {}).get('content', '')
+                    output_tokens = len(tokenizer.encode(response_content))
+
+                    # Update input tokens if provider gives a more accurate count
+                    # This part is now handled by tiktoken initially, but can be refined
+                    
                     await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens)
                     return JSONResponse(final_response)
                         
                 except json.JSONDecodeError:
                     await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
-                    print(f"DEBUG: [Proxy] Calling finalize_log for conversion JSON decode error")
-                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
-                    return Response(content=resp_content, status_code=response.status_code)
+                    # The response is not valid JSON, but we should still try to inform the client in the right format
+                    error_message = f"Upstream service returned non-JSON response with status {response.status_code}"
+                    converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), response.status_code, target_provider, incoming_format)
+                    return JSONResponse(status_code=response.status_code, content=converted_error)
 
         except httpx.RequestError as e:
             logger.error(f"Conversion request failed: {e}")
             latency = time.time() - start_time
             await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
-            print(f"DEBUG: [Proxy] Calling finalize_log for conversion httpx.RequestError")
-            await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
-            raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
+            error_message = f"Upstream service error: {str(e)}"
+            converted_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, target_provider, incoming_format)
+            return JSONResponse(status_code=502, content=converted_error)
 
     async def _stream_converter_with_logging(self, response: httpx.Response, db: AsyncSession, log_entry: Log, from_provider: str, to_format: str, start_time: float, original_model: str):
         """Wrapper for stream_converter that handles logging. It no longer finalizes the log."""
@@ -462,8 +479,19 @@ class ProxyService:
             
             # Final DONE message
             yield "data: [DONE]\n\n"
+        except httpx.RequestError as e:
+            logger.error(f"[Proxy] Stream conversion request failed: {e}", exc_info=True)
+            error_message = f"无法连接到上游服务: {type(e).__name__}"
+            openai_error = ErrorConverter.convert_upstream_error(error_message.encode(), 502, "openai", to_format)
+            yield f"data: {json.dumps(openai_error)}\n\n"
+            yield b"data: [DONE]\n\n"
         except Exception as e:
             logger.error(f"[Proxy] Stream conversion error: {e}", exc_info=True)
+            # Yield a generic error in the stream
+            error_message = f"流转换中发生内部错误: {type(e).__name__}"
+            openai_error = ErrorConverter.convert_upstream_error(error_message.encode(), 500, "openai", to_format)
+            yield f"data: {json.dumps(openai_error)}\n\n"
+            yield b"data: [DONE]\n\n"
         finally:
             await response.aclose()
 

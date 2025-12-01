@@ -553,15 +553,6 @@ class UniversalConverter:
             "choices": [{"index": 0, "delta": {"content": delta_content}, "finish_reason": None}]
         }
         
-    def generic_error_to_openai(self, error_content: bytes, status_code: int, from_format: ApiFormat) -> Dict[str, Any]:
-        """将任何源API的错误响应转换为OpenAI格式（已废弃，使用 ErrorConverter.convert_upstream_error）"""
-        logger.warning("Deprecated: generic_error_to_openai is deprecated, use ErrorConverter.convert_upstream_error instead")
-        return ErrorConverter.convert_upstream_error(error_content, status_code, from_format, "openai")
-
-    def gemini_error_to_openai(self, error_content: bytes, status_code: int) -> Dict[str, Any]:
-        """将 Gemini 错误响应转换为 OpenAI 格式（已废弃，使用 ErrorConverter.gemini_to_openai）"""
-        logger.warning("Deprecated: gemini_error_to_openai is deprecated, use ErrorConverter.gemini_to_openai instead")
-        return ErrorConverter.gemini_to_openai(error_content, status_code)
 
 # 创建单例
 universal_converter = UniversalConverter()
