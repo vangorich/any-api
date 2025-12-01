@@ -51,12 +51,9 @@ async def read_official_keys(
     result = await db.execute(query.offset(skip).limit(size))
     keys = result.scalars().all()
     
-    # Manually convert to schema to include last_status_code
-    key_schemas = [OfficialKeySchema.from_orm(key) for key in keys]
-    
     return PaginatedResponse(
         total=total,
-        items=key_schemas,
+        items=keys,
         page=page,
         size=size
     )

@@ -2,7 +2,7 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func
+from sqlalchemy import func, case
 from app.api import deps
 from app.models.user import User
 from app.models.channel import Channel as ChannelModel
@@ -17,13 +17,47 @@ async def read_channels(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
-    获取当前用户的渠道列表
+    获取当前用户的渠道列表, 包含聚合的密钥统计信息
     """
-    result = await db.execute(
-        select(ChannelModel).where(ChannelModel.user_id == current_user.id)
+    subquery = (
+        select(
+            OfficialKey.channel_id,
+            func.count(OfficialKey.id).label("total_keys"),
+            func.sum(case((OfficialKey.is_active, 1), else_=0)).label("active_keys"),
+            func.sum(OfficialKey.usage_count).label("usage_count"),
+            func.sum(OfficialKey.error_count).label("error_count"),
+            func.sum(OfficialKey.total_tokens).label("total_tokens")
+        )
+        .group_by(OfficialKey.channel_id)
+        .subquery()
     )
-    channels = result.scalars().all()
-    return channels
+
+    stmt = (
+        select(
+            ChannelModel,
+            func.coalesce(subquery.c.total_keys, 0).label("total_keys"),
+            func.coalesce(subquery.c.active_keys, 0).label("active_keys"),
+            func.coalesce(subquery.c.usage_count, 0).label("usage_count"),
+            func.coalesce(subquery.c.error_count, 0).label("error_count"),
+            func.coalesce(subquery.c.total_tokens, 0).label("total_tokens")
+        )
+        .outerjoin(subquery, ChannelModel.id == subquery.c.channel_id)
+        .where(ChannelModel.user_id == current_user.id)
+    )
+
+    result = await db.execute(stmt)
+    
+    channels_data = []
+    for channel, total_keys, active_keys, usage_count, error_count, total_tokens in result.all():
+        channel_dict = channel.__dict__
+        channel_dict["total_keys"] = total_keys
+        channel_dict["active_keys"] = active_keys
+        channel_dict["usage_count"] = usage_count
+        channel_dict["error_count"] = error_count
+        channel_dict["total_tokens"] = total_tokens
+        channels_data.append(channel_dict)
+        
+    return channels_data
 
 @router.post("/", response_model=ChannelSchema)
 async def create_channel(

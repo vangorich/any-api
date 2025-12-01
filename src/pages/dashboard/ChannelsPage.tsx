@@ -36,6 +36,11 @@ interface Channel {
     api_url: string;
     user_id: number;
     created_at: string;
+    total_keys: number;
+    active_keys: number;
+    usage_count: number;
+    error_count: number;
+    total_tokens: number;
 }
 
 interface OfficialKey {
@@ -45,7 +50,7 @@ interface OfficialKey {
     usage_count: number;
     error_count: number;
     total_tokens: number;
-    last_status: string;
+    last_status: string | number;
     last_status_code: number | null;
     channel_id: number | null;
     created_at: string;
@@ -407,7 +412,7 @@ export default function ChannelsPage() {
                                                 ? "text-primary-foreground/80"
                                                 : "text-muted-foreground"
                                         )}>
-                                            {channel.type}
+                                            密钥: {channel.active_keys} / {channel.total_keys}
                                         </div>
                                     </div>
                                     <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">

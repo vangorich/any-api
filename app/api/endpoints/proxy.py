@@ -171,7 +171,7 @@ async def chat_completions(
         result = await chat_processor.process_request(
             request=request,
             db=db,
-            official_key=official_key.key,
+            official_key=official_key,
             exclusive_key=exclusive_key,
             user=user,
             log_level=log_level

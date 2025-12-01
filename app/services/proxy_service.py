@@ -65,27 +65,61 @@ class ProxyService:
         self,
         db: AsyncSession,
         log_entry: Optional[Log],
+        key_obj: Optional[OfficialKey], # 传入key对象
         status_code: int,
         latency: float,
         output_tokens: int,
         ttft: Optional[float] = None
     ):
-        """Finalizes and saves the log entry."""
-        if not log_entry:
+        """Finalizes the log entry and updates the key stats."""
+        if not log_entry or not key_obj:
+            print(f"DEBUG: [Proxy] Finalize_log SKIPPED: No log_entry or key_obj.")
             return
 
+        print(f"DEBUG: [Proxy] --- ENTERING FINALIZE_LOG ---")
+        print(f"DEBUG: [Proxy] Key ID: {key_obj.id}")
+        print(f"DEBUG: [Proxy] Initial Key Stats: usage={key_obj.usage_count}, errors={key_obj.error_count}, tokens={key_obj.total_tokens}")
+        print(f"DEBUG: [Proxy] Log ID: {log_entry.id}")
+        print(f"DEBUG: [Proxy] Event: status_code={status_code}, latency={latency}, output_tokens={output_tokens}")
+
         try:
+            # 1. Finalize Log
             log_entry.status_code = status_code
             log_entry.status = "ok" if 200 <= status_code < 300 else "error"
             log_entry.latency = latency
             log_entry.ttft = ttft if ttft is not None else latency
             log_entry.output_tokens = output_tokens
-            
             db.add(log_entry)
+
+            # 2. Update Key Stats
+            new_usage = key_obj.usage_count + 1
+            new_tokens = key_obj.total_tokens + (log_entry.input_tokens or 0) + output_tokens
+            new_error_count = key_obj.error_count
+            
+            if log_entry.status == "error":
+                new_error_count += 1
+                key_obj.last_status = str(status_code)
+            else:
+                key_obj.last_status = "active"
+
+            print(f"DEBUG: [Proxy] Calculated New Stats: usage={new_usage}, errors={new_error_count}, tokens={new_tokens}")
+
+            key_obj.usage_count = new_usage
+            key_obj.total_tokens = new_tokens
+            key_obj.error_count = new_error_count
+            key_obj.last_status_code = status_code
+            
+            db.add(key_obj)
+
             await db.commit()
-            print(f"DEBUG: [Proxy] Finalized log for key ID {log_entry.official_key_id}")
+            print(f"DEBUG: [Proxy] COMMIT SUCCEEDED for Key ID {key_obj.id}")
+
         except Exception as e:
-            logger.error(f"[Proxy] Failed to finalize log: {e}", exc_info=True)
+            print(f"DEBUG: [Proxy] COMMIT FAILED for Key ID {key_obj.id}. Error: {e}")
+            logger.error(f"[Proxy] Failed to finalize log and key stats: {e}", exc_info=True)
+            await db.rollback()
+        
+        print(f"DEBUG: [Proxy] --- EXITING FINALIZE_LOG ---")
 
 
     def identify_target_provider(self, key: str) -> str:
@@ -221,7 +255,9 @@ class ProxyService:
                 error_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
-                await self._finalize_log(db, log_entry, response.status_code, latency, 0)
+                await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
+                print(f"DEBUG: [Proxy] Calling finalize_log for error response {response.status_code}")
+                await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
                 return Response(content=error_content, status_code=response.status_code, media_type=response.headers.get("content-type"))
 
             excluded_response_headers = {"content-encoding", "content-length", "transfer-encoding", "connection"}
@@ -246,7 +282,9 @@ class ProxyService:
         except httpx.RequestError as e:
             logger.error(f"Proxy request failed: {e}")
             latency = time.time() - start_time
-            await self._finalize_log(db, log_entry, 502, latency, 0)
+            await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
+            print(f"DEBUG: [Proxy] Calling finalize_log for httpx.RequestError")
+            await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
             raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
 
 
@@ -339,7 +377,9 @@ class ProxyService:
                 error_content = await response.aread()
                 await response.aclose()
                 latency = time.time() - start_time
-                await self._finalize_log(db, log_entry, response.status_code, latency, 0)
+                await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
+                print(f"DEBUG: [Proxy] Calling finalize_log for conversion error response {response.status_code}")
+                await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
                 return Response(content=error_content, status_code=response.status_code)
 
             if stream:
@@ -360,17 +400,23 @@ class ProxyService:
                     if log_entry and usage.get("prompt_tokens"):
                         log_entry.input_tokens = usage.get("prompt_tokens")
                     
-                    await self._finalize_log(db, log_entry, response.status_code, latency, output_tokens)
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens)
+                    print(f"DEBUG: [Proxy] Calling finalize_log for successful conversion response")
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, output_tokens)
                     return JSONResponse(final_response)
                         
                 except json.JSONDecodeError:
-                    await self._finalize_log(db, log_entry, response.status_code, latency, 0)
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
+                    print(f"DEBUG: [Proxy] Calling finalize_log for conversion JSON decode error")
+                    await self._finalize_log(db, log_entry, key_obj, response.status_code, latency, 0)
                     return Response(content=resp_content, status_code=response.status_code)
 
         except httpx.RequestError as e:
             logger.error(f"Conversion request failed: {e}")
             latency = time.time() - start_time
-            await self._finalize_log(db, log_entry, 502, latency, 0)
+            await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
+            print(f"DEBUG: [Proxy] Calling finalize_log for conversion httpx.RequestError")
+            await self._finalize_log(db, log_entry, key_obj, 502, latency, 0)
             raise HTTPException(status_code=502, detail=f"Upstream service error: {str(e)}")
 
     async def _stream_converter_with_logging(self, response: httpx.Response, db: AsyncSession, log_entry: Log, from_provider: str, to_format: str, start_time: float, original_model: str):

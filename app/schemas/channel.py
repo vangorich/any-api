@@ -20,6 +20,12 @@ class Channel(ChannelBase):
     id: int
     user_id: int
     created_at: datetime
+    # 聚合统计信息
+    total_keys: int = 0
+    active_keys: int = 0
+    usage_count: int = 0
+    error_count: int = 0
+    total_tokens: int = 0
 
     class Config:
         from_attributes = True

@@ -29,7 +29,7 @@ class ChatProcessor:
         self,
         request: Request,
         db: AsyncSession,
-        official_key: str,
+        official_key: OfficialKey, # Changed from str to OfficialKey object
         exclusive_key: ExclusiveKey,
         user: User,
         log_level: str,
@@ -47,7 +47,7 @@ class ChatProcessor:
             
         openai_request = ChatCompletionRequest(**converted_body)
         
-        log_entry = await self._create_initial_log(db, exclusive_key, user, openai_request.model, openai_request.stream, body_bytes)
+        log_entry = await self._create_initial_log(db, exclusive_key, official_key, user, openai_request.model, openai_request.stream, body_bytes)
 
         presets, regex_rules, preset_regex_rules = await self._load_context(db, exclusive_key)
         openai_request = self._apply_preprocessing(openai_request, presets, regex_rules, preset_regex_rules)
@@ -57,20 +57,21 @@ class ChatProcessor:
             return self._logged_stream_generator(
                 self.stream_chat_completion(
                     final_payload, target_format, original_format, openai_request.model,
-                    official_key, regex_rules, preset_regex_rules
+                    official_key.key, regex_rules, preset_regex_rules
                 ),
                 db=db,
                 log_entry=log_entry,
+                official_key=official_key, # Pass official_key object
                 start_time=start_time
             )
         else:
             result, status_code, _ = await self.non_stream_chat_completion(
                 final_payload, target_format, original_format, openai_request.model,
-                official_key, regex_rules, preset_regex_rules
+                official_key.key, regex_rules, preset_regex_rules
             )
             latency = time.time() - start_time
             output_tokens = result.get('usage', {}).get('completion_tokens', 0)
-            await self._finalize_log(db, log_entry, status_code, latency, output_tokens)
+            await self._finalize_log(db, log_entry, official_key, status_code, latency, output_tokens)
             return result, status_code, original_format
 
     async def _load_context(self, db: AsyncSession, exclusive_key: ExclusiveKey) -> Tuple[List, List, List]:
@@ -153,10 +154,11 @@ class ChatProcessor:
         content = regex_service.process(content, global_post)
         return content
 
-    async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, user: User, model: str, is_stream: bool, request_body: bytes) -> Log:
+    async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, official_key: OfficialKey, user: User, model: str, is_stream: bool, request_body: bytes) -> Log:
         input_tokens = len(request_body) // 4
         log_entry = Log(
             exclusive_key_id=exclusive_key.id,
+            official_key_id=official_key.id, # Link to official key
             user_id=user.id,
             model=model,
             status="processing",
@@ -166,20 +168,56 @@ class ChatProcessor:
             input_tokens=input_tokens,
             output_tokens=0
         )
+        # We don't commit here, just prepare the object
         return log_entry
 
-    async def _finalize_log(self, db: AsyncSession, log_entry: Optional[Log], status_code: int, latency: float, output_tokens: int, ttft: Optional[float] = None):
-        if not log_entry: return
+    async def _finalize_log(self, db: AsyncSession, log_entry: Optional[Log], official_key: OfficialKey, status_code: int, latency: float, output_tokens: int, ttft: Optional[float] = None):
+        if not log_entry or not official_key:
+            print(f"DEBUG: [ChatProcessor] Finalize_log SKIPPED")
+            return
+
+        print(f"DEBUG: [ChatProcessor] --- ENTERING FINALIZE_LOG ---")
+        print(f"DEBUG: [ChatProcessor] Official Key ID: {official_key.id}")
+        print(f"DEBUG: [ChatProcessor] Initial Key Stats: usage={official_key.usage_count}, errors={official_key.error_count}, tokens={official_key.total_tokens}")
+
         try:
+            # 1. Finalize Log
             log_entry.status_code = status_code
             log_entry.status = "ok" if 200 <= status_code < 300 else "error"
             log_entry.latency = latency
             log_entry.ttft = ttft if ttft is not None else latency
             log_entry.output_tokens = output_tokens
             db.add(log_entry)
+
+            # 2. Update Official Key Stats
+            new_usage = official_key.usage_count + 1
+            new_tokens = official_key.total_tokens + (log_entry.input_tokens or 0) + output_tokens
+            new_error_count = official_key.error_count
+            
+            if log_entry.status == "error":
+                new_error_count += 1
+                official_key.last_status = str(status_code)
+            else:
+                official_key.last_status = "active"
+
+            print(f"DEBUG: [ChatProcessor] Calculated New Stats: usage={new_usage}, errors={new_error_count}, tokens={new_tokens}")
+
+            official_key.usage_count = new_usage
+            official_key.total_tokens = new_tokens
+            official_key.error_count = new_error_count
+            official_key.last_status_code = status_code
+            
+            db.add(official_key)
+
             await db.commit()
+            print(f"DEBUG: [ChatProcessor] COMMIT SUCCEEDED for Official Key ID {official_key.id}")
+
         except Exception as e:
-            logger.error(f"[ChatProcessor] Failed to finalize log: {e}", exc_info=True)
+            print(f"DEBUG: [ChatProcessor] COMMIT FAILED. Error: {e}")
+            logger.error(f"[ChatProcessor] Failed to finalize log and key stats: {e}", exc_info=True)
+            await db.rollback()
+        
+        print(f"DEBUG: [ChatProcessor] --- EXITING FINALIZE_LOG ---")
 
     async def non_stream_chat_completion(
         self, payload: Dict, upstream_format: ApiFormat, original_format: ApiFormat, model: str,
@@ -208,7 +246,7 @@ class ChatProcessor:
         
         return openai_response, 200, original_format
 
-    async def _logged_stream_generator(self, generator: AsyncGenerator, db: AsyncSession, log_entry: Log, start_time: float):
+    async def _logged_stream_generator(self, generator: AsyncGenerator, db: AsyncSession, log_entry: Log, official_key: OfficialKey, start_time: float):
         ttft = 0.0
         first_chunk = True
         full_response_content = ""
@@ -235,7 +273,7 @@ class ChatProcessor:
         finally:
             latency = time.time() - start_time
             output_tokens = len(full_response_content) // 4
-            await self._finalize_log(db, log_entry, status_code, latency, output_tokens, ttft)
+            await self._finalize_log(db, log_entry, official_key, status_code, latency, output_tokens, ttft)
 
 
     async def stream_chat_completion(
