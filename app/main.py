@@ -78,11 +78,14 @@ app.include_router(claude_routes.router)
 # 4. SPA 前端服务 (必须在最后)
 static_dir = "static" if os.path.exists("static") else "dist"
 if os.path.exists(static_dir):
-    # 挂载整个 dist 目录到根路径
-    # 这将处理 vite.svg, index.html, assets/* 等所有静态文件
-    # 对于任何未在 API 路由中匹配到的路径, FastAPI 会尝试从 dist 目录中查找文件
-    # HTML5 模式的路由回退由 Starlette 自动处理
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    # 1. 挂载静态文件目录,处理所有静态资源请求 (CSS, JS, images, etc.)
+    app.mount("/", StaticFiles(directory=static_dir), name="static_assets")
+
+    # 2. 创建一个后备路由,捕获所有未被API或静态文件处理的路径
+    #    这确保了在使用前端路由(如/dashboard/system)时刷新页面能正确加载应用
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        return FileResponse(os.path.join(static_dir, "index.html"))
 else:
     print("警告: 静态文件目录 'static' 或 'dist' 未找到,前端将无法访问。")
     @app.get("/", include_in_schema=False)
