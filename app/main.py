@@ -6,7 +6,6 @@ from app.core.database import engine, Base
 from app.models.system_config import SystemConfig
 from app.core.database import get_db
 from sqlalchemy import select
-from contextlib import asynccontextmanager
 import asyncio
 
 @asynccontextmanager
@@ -17,10 +16,6 @@ async def lifespan(app: FastAPI):
         db_dir = os.path.dirname(db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir)
-
-    # # 自动执行数据库迁移 (已禁用，请手动执行 python migrate.py upgrade)
-    # if False: # 自动迁移已禁用
-    #     pass
     
     # Startup: Load site name from DB and set as app title
     db_session_gen = get_db()
@@ -33,9 +28,7 @@ async def lifespan(app: FastAPI):
         else:
             app.title = "Any API"
     except Exception as e:
-        # 如果表不存在或其他数据库错误,提示用户运行迁移
         print(f"警告: 无法加载系统配置: {e}")
-        # 提示用户运行迁移
         print("提示: 如果这是首次运行,请执行: python migrate.py upgrade")
     finally:
         await db.close()
@@ -57,48 +50,46 @@ from app.core.exception_handlers import (
     validation_exception_handler, 
     general_exception_handler
 )
-
 app.add_exception_handler(HTTPException, api_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
+# --- 路由注册 ---
+
+# 1. API 路由 (按照从最精确到最宽泛的顺序)
 from app.api.api import api_router
-from app.api.endpoints import generic_proxy
-from app.api.endpoints import proxy
-from app.api.endpoints import gemini_routes
-from app.api.endpoints import claude_routes
-from app.api.endpoints import universal_routes
+from app.api.endpoints import generic_proxy, proxy, gemini_routes, claude_routes, universal_routes
 
 app.include_router(api_router, prefix=settings.VITE_API_STR)
 
-# 根路径路由挂载顺序至关重要
+# 2. 静态文件服务 (必须在API路由之后,但在通配符路由之前)
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 
-# 1. Gemini Native Routes (/v1beta...) - 优先匹配
+static_dir = "static" if os.path.exists("static") else "dist"
+if os.path.exists(static_dir):
+    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+
+# 3. 其他API路由
 app.include_router(gemini_routes.router)
-
-# 2. OpenAI Compatible Routes (/v1/chat/completions, /v1/models) - 优先于通用/v1路由
-# 必须放在 claude_routes 之前，因为 claude_routes 包含 /v1/{path} 通配符
 app.include_router(proxy.router)
-
-# 3. Claude Native Routes (/v1/messages, etc.)
 app.include_router(claude_routes.router)
+# app.include_router(universal_routes.router)
+# app.include_router(generic_proxy.router, tags=["generic_proxy"])
 
-# 4. Universal Routes (/openai, /gemini, /claude) - 明确的前缀路由
-# Move to later to avoid shadowing /v1beta etc if it catches too broadly (though it has prefix)
-# But wait, universal_routes has path /{provider}/{path:path}.
-# If provider is "v1beta", it matches! And v1beta is not in ["openai", "gemini", "claude"].
-# So it MUST be after specific routes.
-app.include_router(universal_routes.router)
+# 4. SPA 前端 "后备" 路由 (必须在最后)
+if os.path.exists(static_dir):
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa_frontend(full_path: str):
+        """Serve the single page application."""
+        return FileResponse(os.path.join(static_dir, "index.html"))
+else:
+    print("警告: 静态文件目录 'static' 或 'dist' 未找到,前端将无法访问。")
+    @app.get("/", include_in_schema=False)
+    async def root_api_only():
+        return {"message": "Welcome to Any API (Frontend not found)"}
 
-# 5. Generic Proxy (Catch-all) - 最后匹配
-app.include_router(generic_proxy.router, tags=["generic_proxy"])
-
-
-@app.get("/")
-async def root():
-    return {"message": "Welcome to Any API"}
-
+# 这个启动块仅用于 python app/main.py 直接运行, uvicorn CLI 不会执行
 if __name__ == "__main__":
     import uvicorn
-    # 这里我们直接使用 uvicorn 默认的环境变量加载,因为上面已经设置好了
     uvicorn.run(app, host=settings.HOST, port=settings.PORT)
