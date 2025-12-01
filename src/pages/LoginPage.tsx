@@ -119,7 +119,12 @@ export default function LoginPage() {
                 }
             }
 
-            await apiClient.post(`/auth/send-code`, requestData);
+            // ================= DIAGNOSTIC STEP =================
+            // I am temporarily commenting out this line.
+            // If the request still occurs, the running code is not from this file.
+            // await apiClient.post(`/auth/send-code`, requestData);
+            console.log("DIAGNOSTIC: apiClient.post commented out. Request should NOT be sent.", requestData);
+            // =====================================================
 
             toast({
                 variant: 'success',
