@@ -75,16 +75,27 @@ app.include_router(claude_routes.router)
 # app.include_router(generic_proxy.router, tags=["generic_proxy"])
 
 # 4. SPA 前端 "后备" 路由 (必须在最后)
-# 4. SPA 前端服务 (必须在最后)
+# 4. SPA 前端服务 (必须在所有API路由之后)
 static_dir = "static" if os.path.exists("static") else "dist"
 if os.path.exists(static_dir):
-    # 1. 挂载静态文件目录,处理所有静态资源请求 (CSS, JS, images, etc.)
-    app.mount("/", StaticFiles(directory=static_dir), name="static_assets")
+    # 显式挂载 `assets` 目录，这是最安全的做法
+    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
-    # 2. 创建一个后备路由,捕获所有未被API或静态文件处理的路径
-    #    这确保了在使用前端路由(如/dashboard/system)时刷新页面能正确加载应用
+    # 添加一个通用的后备路由来服务前端应用
+    # 它会捕获所有未被API路由匹配到的请求
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(full_path: str):
+    async def serve_frontend(full_path: str):
+        # 检查请求的路径是否对应一个真实存在的文件 (例如 /vite.svg)
+        file_path = os.path.join(static_dir, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+        
+        # 如果不是文件 (例如 /dashboard/system), 则返回 index.html
+        return FileResponse(os.path.join(static_dir, "index.html"))
+
+    # 为根路径单独添加一个路由，以防通配符路由出现问题
+    @app.get("/", include_in_schema=False)
+    async def serve_root():
         return FileResponse(os.path.join(static_dir, "index.html"))
 else:
     print("警告: 静态文件目录 'static' 或 'dist' 未找到,前端将无法访问。")
