@@ -54,6 +54,10 @@ app.add_exception_handler(HTTPException, api_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
+# 注册安全中间件 (添加CSP等安全响应头)
+from app.middleware.security_middleware import SecurityHeadersMiddleware
+app.add_middleware(SecurityHeadersMiddleware)
+
 # --- 路由注册 ---
 
 # 1. API 路由 (按照从最精确到最宽泛的顺序)
