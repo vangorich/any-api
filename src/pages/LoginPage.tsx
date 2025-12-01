@@ -119,12 +119,7 @@ export default function LoginPage() {
                 }
             }
 
-            // ================= DIAGNOSTIC STEP =================
-            // I am temporarily commenting out this line.
-            // If the request still occurs, the running code is not from this file.
-            // await apiClient.post(`/auth/send-code`, requestData);
-            console.log("DIAGNOSTIC: apiClient.post commented out. Request should NOT be sent.", requestData);
-            // =====================================================
+            await apiClient.post(`/auth/send-code`, requestData);
 
             toast({
                 variant: 'success',
@@ -200,6 +195,8 @@ export default function LoginPage() {
         proceedWithSendCode(captchaInfoForTurnstile, token);
         // 重置临时状态
         setCaptchaInfoForTurnstile(null);
+        // 关键修复：在处理完token后，立即重置Turnstile小部件以防止循环
+        sendCodeTurnstileRef.current?.reset();
     };
 
     // 触发发送邮件的最终逻辑 (仅用于无验证码的场景)
