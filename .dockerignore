@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# 数据库
+*.db
+*.sqlite
+*.sqlite3
+sql_app.db
+data/
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+logs/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# 前端构建产物（在容器中会重新构建）
+dist/
+
+# 测试
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.cache/
+
+# 文档
+*.md
+!README.md
+docs/
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose*.yml
+
+# 其他
+*.bak
+*.tmp
+temp/
+.turbo

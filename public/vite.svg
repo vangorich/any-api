@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="rich_grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#41d1ff" />
+      <stop offset="35%" stop-color="#646cff" />
+      <stop offset="70%" stop-color="#bd34fe" />
+      <stop offset="100%" stop-color="#ffc619" />
+    </linearGradient>
+    <filter id="soft_shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+  <path d="M 80 64 H 180 M 80 64 V 192 M 80 128 H 160"
+        fill="none"
+        stroke="url(#rich_grad)"
+        stroke-width="36"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        filter="url(#soft_shadow)" />
+</svg>
