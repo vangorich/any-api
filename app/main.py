@@ -65,10 +65,7 @@ app.include_router(api_router, prefix=settings.VITE_API_STR)
 # 2. 静态文件服务 (必须在API路由之后,但在通配符路由之前)
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
-
-static_dir = "static" if os.path.exists("static") else "dist"
-if os.path.exists(static_dir):
-    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+from fastapi.staticfiles import StaticFiles
 
 # 3. 其他API路由
 app.include_router(gemini_routes.router)
@@ -78,11 +75,14 @@ app.include_router(claude_routes.router)
 # app.include_router(generic_proxy.router, tags=["generic_proxy"])
 
 # 4. SPA 前端 "后备" 路由 (必须在最后)
+# 4. SPA 前端服务 (必须在最后)
+static_dir = "static" if os.path.exists("static") else "dist"
 if os.path.exists(static_dir):
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa_frontend(full_path: str):
-        """Serve the single page application."""
-        return FileResponse(os.path.join(static_dir, "index.html"))
+    # 挂载整个 dist 目录到根路径
+    # 这将处理 vite.svg, index.html, assets/* 等所有静态文件
+    # 对于任何未在 API 路由中匹配到的路径, FastAPI 会尝试从 dist 目录中查找文件
+    # HTML5 模式的路由回退由 Starlette 自动处理
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 else:
     print("警告: 静态文件目录 'static' 或 'dist' 未找到,前端将无法访问。")
     @app.get("/", include_in_schema=False)
