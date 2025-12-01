@@ -21,12 +21,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # 允许Cloudflare Turnstile所需的资源
         csp_policy = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://challenges.cloudflare.com https://static.cloudflareinsights.com; "
             "frame-src 'self' https://challenges.cloudflare.com; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: https:; "
             "font-src 'self' data:; "
-            "connect-src 'self' https://challenges.cloudflare.com;"
+            "connect-src 'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com;"
         )
         
         response.headers["Content-Security-Policy"] = csp_policy
