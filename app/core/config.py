@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # Proxy
     GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com"
 
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
     model_config = SettingsConfigDict(extra='ignore', env_file='.env', env_file_encoding='utf-8')
 
 settings = Settings()
