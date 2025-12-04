@@ -11,7 +11,7 @@ class PresetItem(Base):
     # 预设条目内容
     name = Column(String, nullable=False, default="新条目")
     role = Column(String, nullable=False, default="user") # system, user, assistant
-    type = Column(String, nullable=False, default="normal") # normal, user_input
+    type = Column(String, nullable=False, default="normal") # normal, user_input, history
     content = Column(Text, nullable=False, default="")
     
     # 元数据
