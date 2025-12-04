@@ -22,6 +22,7 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
     const [editingItem, setEditingItem] = useState<PresetItem | Partial<PresetItem> | null>(null);
     const [isDialogOpen, setIsDialogOpen] = useState(false);
     const [items, setItems] = useState<PresetItem[]>([]);
+    const [isSyncing, setIsSyncing] = useState(false);
     const { toast } = useToast();
 
     const sensors = useSensors(
@@ -46,11 +47,11 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
 
             try {
                 // 后台异步更新排序
-                await Promise.all(newItems.map((item, index) =>
-                    presetService.updatePresetItem(preset.id, item.id, { sort_order: index })
+                await Promise.all(newItems.map(
+                    (item, index) =>
+                        presetService.updatePresetItem(preset.id, item.id, { sort_order: index })
                 ));
-                // 同步 content
-                await updatePresetContent(newItems);
+                // 不再同步 Preset.content，只更新 PresetItem 表
             } catch (error) {
                 toast({ variant: 'error', title: '排序失败' });
                 // 失败时恢复原状态
@@ -77,55 +78,31 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
         setIsDialogOpen(true);
     };
 
-    const updatePresetContent = async (updatedItems: PresetItem[]) => {
-        try {
-            const contentPayload = {
-                preset: updatedItems.map((p: PresetItem) => ({
-                    name: p.name,
-                    creator_username: p.creator_username,
-                    created_at: p.created_at,
-                    updated_at: p.updated_at,
-                    enabled: p.enabled,
-                    role: p.role,
-                    type: p.type,
-                    content: p.content,
-                })),
-                regex: [], // Keep regex untouched for now
-            };
-
-            await presetService.updatePreset(preset.id, {
-                name: preset.name,
-                is_active: preset.is_active,
-                sort_order: preset.sort_order,
-                content: contentPayload as any,
-            });
-            // 同步是静默的，不需要提示，除非出错
-        } catch (error) {
-            toast({ variant: 'error', title: '预设内容同步失败' });
-        }
-    };
-
+    /**
+     * 修改说明（第3步）：
+     * - 移除了 updatePresetContent 方法
+     * - 现在只直接操作 PresetItem 表
+     * - 不再维护 Preset.content 的双重存储
+     * - 这确保了数据一致性，避免同步问题
+     */
     const handleSaveItem = async (item: PresetItem | Partial<PresetItem>) => {
         try {
             let newOrUpdatedItem: PresetItem;
             if ('id' in item && item.id) {
-                // Update
+                // Update existing item
                 newOrUpdatedItem = await presetService.updatePresetItem(preset.id, item.id, item);
                 const updatedItems = items.map(i => i.id === newOrUpdatedItem.id ? newOrUpdatedItem : i);
                 setItems(updatedItems);
-                await updatePresetContent(updatedItems);
             } else {
-                // Create
+                // Create new item
                 newOrUpdatedItem = await presetService.createPresetItem(preset.id, item as any);
                 const updatedItems = [...items, newOrUpdatedItem];
                 setItems(updatedItems);
-                await updatePresetContent(updatedItems);
             }
 
             setIsDialogOpen(false);
             setEditingItem(null);
             toast({ variant: 'success', title: '保存成功' });
-            // onItemsChange(); // No longer needed if we optimistically update
         } catch (error) {
             toast({ variant: 'error', title: '保存失败' });
         }
@@ -136,7 +113,6 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
             await presetService.deletePresetItem(preset.id, itemId);
             const updatedItems = items.filter(i => i.id !== itemId);
             setItems(updatedItems); // Optimistic update locally
-            await updatePresetContent(updatedItems);
             toast({ variant: 'success', title: '删除成功' });
         } catch (error) {
             toast({ variant: 'error', title: '删除失败' });
@@ -153,7 +129,6 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
             });
             const updatedItems = [...items, newItem];
             setItems(updatedItems);
-            await updatePresetContent(updatedItems);
             toast({ variant: 'success', title: '复制成功' });
         } catch (error) {
             toast({ variant: 'error', title: '复制失败' });
@@ -165,7 +140,6 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
             await presetService.updatePresetItem(preset.id, item.id, { enabled });
             const updatedItems = items.map(i => i.id === item.id ? { ...i, enabled } : i);
             setItems(updatedItems);
-            await updatePresetContent(updatedItems);
         } catch (error) {
             toast({ variant: 'error', title: '更新失败' });
             onItemsChange(); // Revert on failure
@@ -187,13 +161,13 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
         const exportData = {
             name: preset.name,
             type: 'preset',
-            creator_username: (preset as any).creator_username || 'unknown', // Not in interface
+            creator_username: (preset as any).creator_username || 'unknown',
             created_at: format(toZonedTime(new Date(preset.created_at), 'Asia/Shanghai'), 'yyyy-MM-dd HH:mm:ss'),
             updated_at: format(toZonedTime(new Date(preset.updated_at), 'Asia/Shanghai'), 'yyyy-MM-dd HH:mm:ss'),
             enabled: preset.is_active,
             content: {
                 preset: presetItems,
-                regex: [], // Intentionally empty as we are only exporting items
+                regex: [],
             }
         };
 
@@ -207,6 +181,7 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
 
     const handleImportItems = async () => {
         try {
+            setIsSyncing(true);
             const importedData = await importFromJSON<any>();
             let itemsToImport = [];
 
@@ -219,8 +194,10 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
                 throw new Error('文件格式不兼容');
             }
 
+            // 批量导入预设项
+            const createdItems: PresetItem[] = [];
             for (const item of itemsToImport) {
-                await presetService.createPresetItem(preset.id, {
+                const createdItem = await presetService.createPresetItem(preset.id, {
                     name: item.name,
                     role: item.role,
                     type: item.type,
@@ -228,9 +205,12 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
                     enabled: item.enabled,
                     sort_order: items.length + itemsToImport.indexOf(item),
                 });
+                createdItems.push(createdItem);
             }
 
-            onItemsChange();
+            // 更新本地状态
+            setItems([...items, ...createdItems]);
+            
             toast({
                 variant: 'success',
                 title: '导入成功',
@@ -242,6 +222,8 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
                 title: '导入失败',
                 description: error instanceof Error ? error.message : '未知错误',
             });
+        } finally {
+            setIsSyncing(false);
         }
     };
 
@@ -257,13 +239,23 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
                         </p>
                     </div>
                     <div className="flex items-center gap-2">
-                        <Button onClick={handleExportItems} variant="outline" size="sm" disabled={items.length === 0}>
+                        <Button 
+                            onClick={handleExportItems} 
+                            variant="outline" 
+                            size="sm" 
+                            disabled={items.length === 0}
+                        >
                             <Download className="w-4 h-4 mr-2" />
                             导出
                         </Button>
-                        <Button onClick={handleImportItems} variant="outline" size="sm">
+                        <Button 
+                            onClick={handleImportItems} 
+                            variant="outline" 
+                            size="sm"
+                            disabled={isSyncing}
+                        >
                             <Upload className="w-4 h-4 mr-2" />
-                            导入
+                            {isSyncing ? '导入中...' : '导入'}
                         </Button>
                         <Button onClick={handleAddItem} size="sm">
                             <Plus className="w-4 h-4 mr-2" />
@@ -307,15 +299,12 @@ export function PresetItemEditor({ preset, onItemsChange }: PresetItemEditorProp
                 )}
             </ScrollArea>
 
-            {/* 编辑弹窗 */}
+            {/* 编辑对话框 */}
             {editingItem && (
                 <PresetItemEditDialog
                     item={editingItem as PresetItem}
                     open={isDialogOpen}
-                    onOpenChange={(open) => {
-                        setIsDialogOpen(open);
-                        if (!open) setEditingItem(null);
-                    }}
+                    onOpenChange={setIsDialogOpen}
                     onSave={handleSaveItem}
                 />
             )}
