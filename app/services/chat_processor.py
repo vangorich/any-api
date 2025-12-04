@@ -161,7 +161,15 @@ class ChatProcessor:
         global_rules: List,
         local_rules: List
     ) -> ChatCompletionRequest:
-        """应用所有前置处理: 全局正则 -> 局部正则 -> 预设 -> 变量"""
+        """应用所有前置处理: 全局正则 -> 局部正则 -> 预设 -> 变量
+        
+        修改说明（第2步）：
+        - 改进了预设项的处理逻辑
+        - 修复了历史消息的类型转换问题
+        - 添加了更详细的错误处理和日志
+        - 支持 normal、user_input、history 三种类型
+        - 使用 _safe_content_to_string 安全转换内容
+        """
         # 1. 应用正则
         global_pre = [r for r in global_rules if r.type == "pre"]
         local_pre = [r for r in local_rules if r.type == "pre"]
@@ -175,27 +183,97 @@ class ChatProcessor:
             for preset in presets:
                 try:
                     items = preset.get('items', [])
-                    if not items: continue
+                    if not items:
+                        logger.debug(f"预设 {preset.get('name')} 没有预设项")
+                        continue
 
+                    # 按 order 排序预设项
                     sorted_items = sorted(items, key=lambda x: x.get('order', 0))
-                    processed_messages, original_messages = [], list(request.messages)
-                    last_user_message = next((msg for msg in reversed(original_messages) if msg.role == 'user'), None)
-                    history_messages = [msg for msg in original_messages if msg != last_user_message]
+                    
+                    # 保存原始消息用于后续处理
+                    original_messages = list(request.messages)
+                    
+                    # 找到最后一条用户消息
+                    last_user_message = None
+                    last_user_index = -1
+                    for i in range(len(original_messages) - 1, -1, -1):
+                        if original_messages[i].role == 'user':
+                            last_user_message = original_messages[i]
+                            last_user_index = i
+                            break
+                    
+                    # 获取历史消息（除了最后一条用户消息的所有消息）
+                    history_messages = []
+                    if last_user_index >= 0:
+                        history_messages = original_messages[:last_user_index]
+                    else:
+                        # 如果没有用户消息，所有消息都是历史
+                        history_messages = original_messages
+                    
+                    # 处理预设项
+                    processed_messages = []
                     
                     for item in sorted_items:
-                        if not item.get('enabled', True): continue
+                        # 检查是否启用
+                        if not item.get('enabled', True):
+                            logger.debug(f"预设项 {item.get('name')} 已禁用，跳过")
+                            continue
+                        
                         item_type = item.get('type', 'normal')
-                        if item_type == 'normal':
-                            processed_messages.append({'role': item.get('role', 'system'), 'content': item.get('content', '')})
-                        elif item_type == 'user_input' and last_user_message:
-                            processed_messages.append({'role': last_user_message.role, 'content': last_user_message.content})
-                        elif item_type == 'history':
-                            processed_messages.extend([{'role': h.role, 'content': h.content if isinstance(h.content, str) else str(h.content)} for h in history_messages])
+                        item_role = item.get('role', 'system')
+                        item_content = item.get('content', '')
+                        
+                        try:
+                            if item_type == 'normal':
+                                # 普通类型：直接注入
+                                processed_messages.append({
+                                    'role': item_role,
+                                    'content': item_content
+                                })
+                                logger.debug(f"添加普通预设项: {item.get('name')}")
+                                
+                            elif item_type == 'user_input':
+                                # 用户输入类型：插入最后一条用户消息
+                                if last_user_message:
+                                    processed_messages.append({
+                                        'role': last_user_message.role,
+                                        'content': self._safe_content_to_string(last_user_message.content)
+                                    })
+                                    logger.debug(f"添加用户输入预设项: {item.get('name')}")
+                                else:
+                                    logger.warning(f"预设项 {item.get('name')} 类型为 user_input，但没有找到用户消息")
+                                    
+                            elif item_type == 'history':
+                                # 历史类型：插入历史对话
+                                if history_messages:
+                                    for hist_msg in history_messages:
+                                        processed_messages.append({
+                                            'role': hist_msg.role,
+                                            'content': self._safe_content_to_string(hist_msg.content)
+                                        })
+                                    logger.debug(f"添加历史预设项: {item.get('name')}，包含 {len(history_messages)} 条消息")
+                                else:
+                                    logger.debug(f"预设项 {item.get('name')} 类型为 history，但没有历史消息")
+                            else:
+                                logger.warning(f"未知的预设项类型: {item_type}，预设项: {item.get('name')}")
+                        
+                        except Exception as e:
+                            logger.error(f"处理预设项 {item.get('name')} 时出错: {e}", exc_info=True)
+                            continue
                     
+                    # 如果有处理过的消息，替换原始消息
                     if processed_messages:
-                        request.messages = [ChatMessage(**msg) for msg in processed_messages]
+                        try:
+                            request.messages = [ChatMessage(**msg) for msg in processed_messages]
+                            logger.info(f"预设 {preset.get('name')} 应用成功，共处理 {len(processed_messages)} 条消息")
+                        except Exception as e:
+                            logger.error(f"创建 ChatMessage 对象时出错: {e}", exc_info=True)
+                            # 如果转换失败，保持原始消息
+                            pass
+                    
                 except Exception as e:
-                    logger.error(f"预设处理失败: {e}")
+                    logger.error(f"预设 {preset.get('name')} 处理失败: {e}", exc_info=True)
+                    # 继续处理下一个预设，不中断整个流程
                     continue
 
         # 3. 应用变量
@@ -204,6 +282,27 @@ class ChatProcessor:
                 msg.content = variable_service.parse_variables(msg.content)
         
         return request
+
+    def _safe_content_to_string(self, content: Any) -> str:
+        """安全地将内容转换为字符串
+        
+        处理多种内容类型：
+        - 字符串：直接返回
+        - 字典/列表：转换为 JSON 字符串
+        - 其他类型：使用 str() 转换
+        
+        这个方法解决了历史消息中可能包含复杂对象的问题
+        """
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, (dict, list)):
+            try:
+                return json.dumps(content, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"JSON 序列化失败: {e}，使用 str() 转换")
+                return str(content)
+        else:
+            return str(content)
 
     def _apply_postprocessing(self, content: str, global_rules: List, local_rules: List) -> str:
         """应用所有后置处理: 局部正则 -> 全局正则"""
