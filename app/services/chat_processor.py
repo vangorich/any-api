@@ -4,6 +4,7 @@ import httpx
 import logging
 from typing import AsyncGenerator, Tuple, List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.schemas.openai import ChatCompletionRequest, ChatMessage
 from app.services.universal_converter import universal_converter, ApiFormat
@@ -31,7 +32,7 @@ class ChatProcessor:
         self,
         request: Request,
         db: AsyncSession,
-        official_key: OfficialKey, # Changed from str to OfficialKey object
+        official_key: OfficialKey,
         exclusive_key: ExclusiveKey,
         user: User,
         log_level: str,
@@ -63,7 +64,7 @@ class ChatProcessor:
                 ),
                 db=db,
                 log_entry=log_entry,
-                official_key=official_key, # Pass official_key object
+                official_key=official_key,
                 start_time=start_time
             )
         else:
@@ -72,7 +73,6 @@ class ChatProcessor:
                 official_key.key, regex_rules, preset_regex_rules
             )
             latency = time.time() - start_time
-            # Re-calculate output tokens from the actual response content
             tokenizer = get_tokenizer(openai_request.model)
             response_content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
             output_tokens = len(tokenizer.encode(response_content))
@@ -80,21 +80,78 @@ class ChatProcessor:
             return result, status_code, original_format
 
     async def _load_context(self, db: AsyncSession, exclusive_key: ExclusiveKey) -> Tuple[List, List, List]:
-        """从数据库加载预设和正则规则"""
+        """从数据库加载预设和正则规则
+        
+        修改说明：
+        - 现在直接从 PresetItem 表读取预设项，而不是从 Preset.content 读取
+        - 这确保了数据的一致性，并支持 history 类型
+        - 向后兼容：如果 PresetItem 为空，可以回退到 Preset.content
+        """
         presets, regex_rules, preset_regex_rules = [], [], []
+        
         if exclusive_key.preset_id:
-            result = await db.execute(select(Preset).filter(Preset.id == exclusive_key.preset_id))
+            # 使用 selectinload 预加载关联的 items，避免 N+1 查询
+            result = await db.execute(
+                select(Preset)
+                .options(selectinload(Preset.items))
+                .filter(Preset.id == exclusive_key.preset_id)
+            )
             preset = result.scalars().first()
+            
             if preset:
-                await db.refresh(preset)
-                presets.append({"id": preset.id, "name": preset.name, "content": preset.content})
-                result = await db.execute(select(PresetRegexRule).filter(PresetRegexRule.preset_id == preset.id, PresetRegexRule.is_active == True))
+                # 直接使用 PresetItem 表中的数据
+                if preset.items:
+                    # 按 sort_order 排序
+                    sorted_items = sorted(preset.items, key=lambda x: x.sort_order)
+                    
+                    items_data = []
+                    for item in sorted_items:
+                        items_data.append({
+                            "role": item.role,
+                            "type": item.type,
+                            "content": item.content,
+                            "enabled": item.enabled,
+                            "order": item.sort_order,
+                            "name": item.name,
+                        })
+                    
+                    presets.append({
+                        "id": preset.id,
+                        "name": preset.name,
+                        "items": items_data
+                    })
+                else:
+                    # 向后兼容：如果 PresetItem 表为空，尝试从 Preset.content 读取
+                    # 这支持老客户端的数据迁移
+                    if preset.content:
+                        try:
+                            content_data = json.loads(preset.content) if isinstance(preset.content, str) else preset.content
+                            items = content_data.get('preset') or content_data.get('items', [])
+                            if items:
+                                presets.append({
+                                    "id": preset.id,
+                                    "name": preset.name,
+                                    "items": items
+                                })
+                        except (json.JSONDecodeError, TypeError) as e:
+                            logger.warning(f"预设 {preset.id} 的 content 解析失败: {e}")
+                
+                # 加载预设关联的正则规则
+                result = await db.execute(
+                    select(PresetRegexRule).filter(
+                        PresetRegexRule.preset_id == preset.id,
+                        PresetRegexRule.is_active == True
+                    )
+                )
                 preset_regex_rules = result.scalars().all()
         
+        # 加载全局正则规则
         if exclusive_key.enable_regex:
-            result = await db.execute(select(RegexRule).filter(RegexRule.is_active == True))
+            result = await db.execute(
+                select(RegexRule).filter(RegexRule.is_active == True)
+            )
             regex_rules = result.scalars().all()
-            
+        
         return presets, regex_rules, preset_regex_rules
 
     def _apply_preprocessing(
@@ -117,10 +174,7 @@ class ChatProcessor:
         if presets and request.messages:
             for preset in presets:
                 try:
-                    content_str = preset.get('content')
-                    if not content_str: continue
-                    preset_content = json.loads(content_str) if isinstance(content_str, str) else content_str
-                    items = preset_content.get('preset') or preset_content.get('items', [])
+                    items = preset.get('items', [])
                     if not items: continue
 
                     sorted_items = sorted(items, key=lambda x: x.get('order', 0))
@@ -160,7 +214,6 @@ class ChatProcessor:
         return content
 
     async def _create_initial_log(self, db: AsyncSession, exclusive_key: ExclusiveKey, official_key: OfficialKey, user: User, model: str, is_stream: bool, messages: List[Dict[str, Any]]) -> Log:
-        # Use tiktoken for input tokens
         input_tokens = count_tokens_for_messages(messages, model)
         
         log_entry = Log(
@@ -182,13 +235,11 @@ class ChatProcessor:
             return
 
         try:
-            # Ensure status_code is a valid integer for comparison
             try:
                 numeric_status_code = int(status_code)
             except (ValueError, TypeError):
-                numeric_status_code = 500  # Default to internal server error if conversion fails
+                numeric_status_code = 500
             
-            # 1. Finalize Log
             log_entry.status_code = numeric_status_code
             log_entry.status = "ok" if 200 <= numeric_status_code < 300 else "error"
             log_entry.latency = latency
@@ -196,7 +247,6 @@ class ChatProcessor:
             log_entry.output_tokens = output_tokens
             db.add(log_entry)
 
-            # 2. Update Official Key Stats
             official_key.usage_count += 1
             official_key.input_tokens = (official_key.input_tokens or 0) + (log_entry.input_tokens or 0)
             official_key.output_tokens = (official_key.output_tokens or 0) + output_tokens
@@ -259,18 +309,16 @@ class ChatProcessor:
                     if content_part != b'[DONE]':
                         try:
                             json_content = json.loads(content_part)
-                            # Handle cases where json_content might be a list of chunks
                             chunks_to_process = json_content if isinstance(json_content, list) else [json_content]
                             for chunk_item in chunks_to_process:
                                 if not isinstance(chunk_item, dict): continue
 
                                 if chunk_item.get('error'):
-                                    # Ensure status_code is an integer
                                     code = chunk_item.get('error', {}).get('code', 500)
                                     try:
                                         status_code = int(code)
                                     except (ValueError, TypeError):
-                                        status_code = 500 # Fallback for non-integer codes
+                                        status_code = 500
                                 if chunk_item.get('choices'):
                                     delta = chunk_item['choices'][0].get('delta', {})
                                     full_response_content += delta.get('content', '')
